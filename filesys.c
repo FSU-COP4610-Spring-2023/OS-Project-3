@@ -125,6 +125,7 @@ int main(int argc, char * argv[]) {
     firstDataSectorOffset = firstDataSector * bpb.BPB_BytesPerSec;
     cwd.rootOffset = firstDataSectorOffset;
     cwd.byteOffset = cwd.rootOffset;
+    cwd.cluster = bpb.BPB_RootClus;
     printf("First data offset is %lu\n", firstDataSectorOffset);
     memset(cwd.path, 0, PATH_SIZE);
 
@@ -160,22 +161,30 @@ int main(int argc, char * argv[]) {
 int find(char* DIRNAME){ // If found, currEntry will hold directory in question
     int i, j;
     unsigned long originalPos = ftell(fp);
+    int currCluster = cwd.cluster;
+    int fatEntryOffset;
     fseek(fp, cwd.byteOffset, SEEK_SET);
-    for(i = 0; i < 16; i++){
-        long dirStart = ftell(fp);
-        fread(&currEntry, sizeof(DirEntry), 1, fp);
-        if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name == 0x00)
-            continue;
-        for(j = 0; j < 11; j++){
-            if(currEntry.DIR_Name[j] == 0x20)
-                currEntry.DIR_Name[j] = 0x00;
+    while(currCluster != 0xFFFFFFFF && currCluster != 0x0FFFFFF8 && currCluster != 0x0FFFFFFE && currCluster != 0xFFFFFFF && currCluster != 0xFFFFFFFF){
+        long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+        fseek(fp, byteOffsetOfCluster, SEEK_SET);
+        for(i = 0; i < 16; i++){
+            fread(&currEntry, sizeof(DirEntry), 1, fp);
+            if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name == 0x00)
+                continue;
+            for(j = 0; j < 11; j++){
+                if(currEntry.DIR_Name[j] == 0x20)
+                    currEntry.DIR_Name[j] = 0x00;
+            }
+            if(strcmp(currEntry.DIR_Name, DIRNAME) == 0){
+                if(currEntry.DIR_Attr == 0x10)
+                    return 0; // Directory exists
+                else
+                    return 1; // Directory exists but is a file
+            }
         }
-        if(strcmp(currEntry.DIR_Name, DIRNAME) == 0){
-            if(currEntry.DIR_Attr == 0x10)
-                return 0; // Directory exists
-            else
-                return 1; // Directory exists but is a file
-        }
+        fatEntryOffset = (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec + (currCluster * 4));
+        fseek(fp, fatEntryOffset, SEEK_SET);
+        fread(&currCluster, sizeof(int), 1, fp);
     }
     fseek(fp, originalPos, SEEK_SET);
     return -1; // Directory does NOT exist at all
@@ -205,8 +214,6 @@ void cd(char* DIRNAME){
         unsigned short Lo = currEntry.DIR_FstClusLo;
         unsigned int cluster = (Hi<<8) | Lo;
         unsigned long byteOffset = (firstDataSector + ((cluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
-        printf("DIRNAME %s's cluster number is %d\n", DIRNAME, cluster);
-        printf("Byte offset of this cluster is %lu\n", byteOffset);
         if(cluster == 0){
             cwd.cluster = bpb.BPB_RootClus;
             cwd.byteOffset = cwd.rootOffset;
@@ -215,8 +222,18 @@ void cd(char* DIRNAME){
             cwd.cluster = cluster;  
             cwd.byteOffset = byteOffset;
         }
-        strcat(cwd.path, "/");
-        strcat(cwd.path, DIRNAME);
+        if(strcmp(DIRNAME, "..") == 0){
+            int i = strlen(cwd.path);
+            char* current;
+            while(strcmp(current, "/") != 0){
+                cwd.path[i--] = '\0';
+                current = &cwd.path[i];
+            }
+            cwd.path[i] = '\0';
+        }else if(strcmp(DIRNAME, ".") != 0){
+            strcat(cwd.path, "/");
+            strcat(cwd.path, DIRNAME);
+        }
     }else if(result == 1){
        printf("Error: %s is a file.\n", DIRNAME);
     }else if(result == -1){
@@ -229,18 +246,27 @@ void ls(void){
     int i, j;
     unsigned long originalPos = ftell(fp);
     fseek(fp, cwd.byteOffset, SEEK_SET);
-    for(i = 0; i < 16; i++){
-        long dirStart = ftell(fp);
-        fread(&currEntry, sizeof(DirEntry), 1, fp);
-        if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name == 0x00)
-            continue;
-        for(j = 0; j < 11; j++){
-            if(currEntry.DIR_Name[j] == 0x20)
-                currEntry.DIR_Name[j] = 0x00;
+    int currCluster = cwd.cluster;
+    int fatEntryOffset;
+    printf("Starting cluster is %d\n", cwd.cluster);
+    while(currCluster != 0xFFFFFFFF && currCluster != 0x0FFFFFF8 && currCluster != 0x0FFFFFFE && currCluster != 0xFFFFFF0F && currCluster != 0xFFFFFFF){
+        long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+        fseek(fp, byteOffsetOfCluster, SEEK_SET);
+        for(i = 0; i < 16; i++){
+            fread(&currEntry, sizeof(DirEntry), 1, fp);
+            if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name == 0x00)
+                continue;
+            for(j = 0; j < 11; j++){
+                if(currEntry.DIR_Name[j] == 0x20)
+                    currEntry.DIR_Name[j] = 0x00;
+            }
+            printf("%s ", currEntry.DIR_Name);
         }
-        printf("%s ", currEntry.DIR_Name);
+        printf("\n");
+        fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
+        fseek(fp, fatEntryOffset, SEEK_SET);
+        fread(&currCluster, sizeof(int), 1, fp);
     }
-    printf("\n");
     fseek(fp, originalPos, SEEK_SET);
 }
 // Part 2 END
@@ -291,7 +317,38 @@ void lsof(void){
 }
 
 void size(char* FILENAME){
-    // If FILENAME exists in cwd
+    int result = find(FILENAME);
+    if (result == -1){
+        printf("%s does not exist\n", FILENAME);
+    }else if (result == 0){
+        printf("%s is a directory\n", FILENAME);
+    }
+    int i, j;
+    unsigned long originalPos = ftell(fp);
+    fseek(fp, cwd.byteOffset, SEEK_SET);
+    int currCluster = cwd.cluster;
+    int fatEntryOffset;
+    while(currCluster != 0xFFFFFFFF && currCluster != 0x0FFFFFF8 && currCluster != 0x0FFFFFFE && currCluster != 0xFFFFFF0F && currCluster != 0xFFFFFFF){
+        long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+        fseek(fp, byteOffsetOfCluster, SEEK_SET);
+        for(i = 0; i < 16; i++){
+            fread(&currEntry, sizeof(DirEntry), 1, fp);
+            if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name == 0x00)
+                continue;
+            for(j = 0; j < 11; j++){
+                if(currEntry.DIR_Name[j] == 0x20)
+                    currEntry.DIR_Name[j] = 0x00;
+            }
+            printf("%s ", currEntry.DIR_Name);
+        }
+        printf("\n");
+        fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
+        fseek(fp, fatEntryOffset, SEEK_SET);
+        fread(&currCluster, sizeof(int), 1, fp);
+    }
+    fseek(fp, originalPos, SEEK_SET);
+
+    
     // print("Size in bytes: ");
     // else
     // print("Error: file does not exist");
