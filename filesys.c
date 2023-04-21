@@ -62,17 +62,17 @@ typedef struct __attribute__((packed)){
 } BPB;
 
 typedef struct{
-    char* name;
-    FILE* fp;
-    size_t size;
+    char* path;
+    DirEntry dirEntry;
     unsigned int offset;
-    unsigned int firstCluster; // First cluster location in bytes
+    unsigned int firstCluster; // First cluster location
+    unsigned int firstClusterOffset; // Offset of first cluster in bytes
+    int mode; // 2=rw, 1=w, 0=r, -1=not open
 } File;
 
 
 // stack implementation -- you will have to implement a dynamic stack
 // Hint: For removal of files/directories
-
 
 typedef struct {
     char path[PATH_SIZE]; // path string
@@ -96,6 +96,8 @@ void add_to_path(char * dir);
 void info(void);
 void cd(char* DIRNAME);
 void ls(void);
+void lseek(char* FILENAME, unsigned int OFFSET);
+void read(char* FILENAME, unsigned int size);
 
 // global variables
 CWD cwd;
@@ -105,17 +107,19 @@ FILE* fp;
 int rootDirSectors;
 int firstDataSector;
 long firstDataSectorOffset;
+File openFiles[10];
+void size(char* FILENAME);
 
 int main(int argc, char * argv[]) {
     // error checking for number of arguments.
     if(argc != 2){
-        printf("Incorrect number of arguments.");
+        printf("Incorrect number of arguments.\n");
         return 0;
     }
     // read and open argv[1] in file pointer.
     fp = fopen(argv[1], "r+");
     if(fp == NULL){
-        printf("Could not open file %s", argv[1]);
+        printf("Could not open file %s\n", argv[1]);
         return 0;
     }
     // obtain important information from bpb as well as initialize any important global variables
@@ -145,9 +149,24 @@ int main(int argc, char * argv[]) {
             if(tokens->items[1] != NULL)
                 cd(tokens->items[1]);
             else
-                printf("ERROR: You must enter a directory to switch to\n");
+                printf("ERROR: You must enter a directory to switch to.\n");
         }else if (strcmp(tokens->items[0], "ls") == 0){
             ls();
+        }else if (strcmp(tokens->items[0], "size") == 0){
+            if(tokens->items[1] != NULL)
+                size(tokens->items[1]);
+            else
+                printf("ERROR: Enter a filename to determine the size of.\n");
+        }else if (strcmp(tokens->items[0], "lseek") == 0){
+            if(tokens->items[1] != NULL && tokens->items[2] != NULL){
+                lseek(tokens->items[1], atoi(tokens->items[2]));
+            }else
+                printf("ERROR: Incorrect # of arguments.\nUsage: lseek [FILENAME] [OFFSET]\n");
+        }else if (strcmp(tokens->items[0], "read") == 0){
+            if(tokens->items[1] != NULL && tokens->items[2] != NULL){
+                read(tokens->items[1], atoi(tokens->items[2]));
+            }else
+                printf("ERROR: Incorrect # of arguments.\nUsage: read [OPENEDFILE] [SIZE]\n");
         }
         //add_to_path(tokens->items[0]);      // move this out to its correct place;
         free(input);
@@ -235,9 +254,9 @@ void cd(char* DIRNAME){
             strcat(cwd.path, DIRNAME);
         }
     }else if(result == 1){
-       printf("Error: %s is a file.\n", DIRNAME);
+       printf("ERROR: %s is a file.\n", DIRNAME);
     }else if(result == -1){
-       printf("Error: file or directory does not exist.\n", result);
+       printf("ERROR: file or directory does not exist.\n", result);
     }
 }
 
@@ -322,41 +341,86 @@ void size(char* FILENAME){
         printf("%s does not exist\n", FILENAME);
     }else if (result == 0){
         printf("%s is a directory\n", FILENAME);
+    }else{
+        printf("%d %s\n", currEntry.DIR_FileSize, FILENAME);
     }
-    int i, j;
-    unsigned long originalPos = ftell(fp);
-    fseek(fp, cwd.byteOffset, SEEK_SET);
-    int currCluster = cwd.cluster;
-    int fatEntryOffset;
-    while(currCluster != 0xFFFFFFFF && currCluster != 0x0FFFFFF8 && currCluster != 0x0FFFFFFE && currCluster != 0xFFFFFF0F && currCluster != 0xFFFFFFF){
-        long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
-        fseek(fp, byteOffsetOfCluster, SEEK_SET);
-        for(i = 0; i < 16; i++){
-            fread(&currEntry, sizeof(DirEntry), 1, fp);
-            if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name == 0x00)
-                continue;
-            for(j = 0; j < 11; j++){
-                if(currEntry.DIR_Name[j] == 0x20)
-                    currEntry.DIR_Name[j] = 0x00;
-            }
-            printf("%s ", currEntry.DIR_Name);
-        }
-        printf("\n");
-        fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
-        fseek(fp, fatEntryOffset, SEEK_SET);
-        fread(&currCluster, sizeof(int), 1, fp);
-    }
-    fseek(fp, originalPos, SEEK_SET);
-
-    
     // print("Size in bytes: ");
     // else
     // print("Error: file does not exist");
 }
 
-void lseek(char* FILENAME){
-    // If FILENAME is open and in cwd
-    // set 
+void lseek(char* FILENAME, unsigned int OFFSET){
+    int fileOpen = 1;
+    int i;
+    int targetFile;
+    for(i = 0; i < 10; i++){
+        if(strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0 && openFiles[i].mode != -1){
+            fileOpen = 0;
+            targetFile = 1;
+        }
+    }
+    if(fileOpen == 1){
+        printf("ERROR: No file named %s has been opened.\n", FILENAME);
+    }else if(OFFSET > openFiles[targetFile].dirEntry.DIR_FileSize){
+        printf("ERROR: Offset is larger than file size.\n");
+    }else{
+        openFiles[targetFile].offset = OFFSET;
+    }
+}
+
+void read(char* FILENAME, unsigned int size){
+    int fileOpen = 1;
+    int i;          
+    int targetFile;
+    for(i = 0; i < 10; i++){   
+        if(strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0 && openFiles[i].mode != -1){
+            fileOpen = 0;
+            targetFile = 1;
+        }
+    }
+    if(fileOpen == 1){
+        printf("ERROR: No file named %s has been opened for reading.\n", FILENAME);
+    }else if(openFiles[targetFile].dirEntry.DIR_FileSize > openFiles[targetFile].offset + size){
+        printf("ERROR: Offset is larger than file size.\n");
+    }else{
+        long originalPos = ftell(fp);
+        char currChar;
+        File target = openFiles[targetFile];
+        long currByte = 0;
+        int clustersChained = target.offset / (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec);
+        int byteInCurrentCluster = target.offset % (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec);
+        int currCluster = target.firstCluster;
+        int currClusterOffset = target.firstClusterOffset;
+        int fatEntryOffset;
+        int charsRead = 0;
+        int i;
+        while(charsRead < size && target.offset < target.dirEntry.DIR_FileSize){
+            for(i = 0; i < clustersChained; i++){ // Immediately chain to current cluster and jump to byte where offset is
+                fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
+                fseek(fp, fatEntryOffset, SEEK_SET);
+                fread(&currCluster, sizeof(int), 1, fp);
+                currClusterOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                if(i == (clustersChained - 1)){
+                    currByte = currClusterOffset + byteInCurrentCluster;
+                    fseek(fp, currByte, SEEK_SET);
+                }
+            }
+            // If end of current cluster is reached:
+            if(currByte % (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec) == 0 && target.offset != 0){ 
+                fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
+                fread(&currCluster, sizeof(int), 1, fp);
+                currClusterOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                currByte = currClusterOffset;
+                fseek(fp, currByte, SEEK_SET);
+            }
+            fread(&currChar, sizeof(char), 1, fp);
+            printf("%c", currChar);
+            currByte++;
+            charsRead++;
+            target.offset++;
+        }
+        fseek(fp, originalPos, SEEK_SET);
+    }
 }
 
 // Part 4 END
