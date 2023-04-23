@@ -67,7 +67,7 @@ typedef struct{
     unsigned int offset;
     unsigned int firstCluster; // First cluster location
     unsigned int firstClusterOffset; // Offset of first cluster in bytes
-    int mode; // 2=rw, 1=w, 0=r, -1=not open
+    int mode; // 2=rw, 1=w, 0=r, -1=not open (i.e, -1 is a "free" spot)
 } File;
 
 
@@ -98,6 +98,10 @@ void cd(char* DIRNAME);
 void ls(void);
 void lseek(char* FILENAME, unsigned int OFFSET);
 void read(char* FILENAME, unsigned int size);
+void size(char* FILENAME);
+void open(char* FILENAME, int FLAGS);
+void lsof(void);
+void close(char* FILENAME);
 
 // global variables
 CWD cwd;
@@ -108,7 +112,7 @@ int rootDirSectors;
 int firstDataSector;
 long firstDataSectorOffset;
 File openFiles[10];
-void size(char* FILENAME);
+int numFilesOpen = 0;
 
 int main(int argc, char * argv[]) {
     // error checking for number of arguments.
@@ -122,6 +126,7 @@ int main(int argc, char * argv[]) {
         printf("Could not open file %s\n", argv[1]);
         return 0;
     }
+
     // obtain important information from bpb as well as initialize any important global variables
     fread(&bpb, sizeof(BPB), 1, fp);
     rootDirSectors = ((bpb.BPB_RootEntCnt * 32) + (bpb.BPB_BytesPerSec - 1)) / bpb.BPB_BytesPerSec;
@@ -130,8 +135,13 @@ int main(int argc, char * argv[]) {
     cwd.rootOffset = firstDataSectorOffset;
     cwd.byteOffset = cwd.rootOffset;
     cwd.cluster = bpb.BPB_RootClus;
-    printf("First data offset is %lu\n", firstDataSectorOffset);
     memset(cwd.path, 0, PATH_SIZE);
+    strcat(cwd.path, argv[1]);
+
+    // Initialize all empty File objects in openFiles[10] to be closed
+    int i;
+    for(i = 0; i < 10; i++)
+        openFiles[i].mode = -1;
 
     // parser
     char *input;
@@ -166,7 +176,24 @@ int main(int argc, char * argv[]) {
             if(tokens->items[1] != NULL && tokens->items[2] != NULL){
                 read(tokens->items[1], atoi(tokens->items[2]));
             }else
-                printf("ERROR: Incorrect # of arguments.\nUsage: read [OPENEDFILE] [SIZE]\n");
+                printf("ERROR: Incorrect # of arguments.\nUsage: read [FILENAME] [SIZE]\n");
+        }else if (strcmp(tokens->items[0], "open") == 0){
+            if(tokens->items[1] != NULL && tokens->items[2] != NULL){
+                int flags;
+                if (strcmp(tokens->items[2], "-r") == 0) flags = 0;
+                if (strcmp(tokens->items[2], "-w") == 0) flags = 1;
+                if (strcmp(tokens->items[2], "-rw") == 0) flags = 2;
+                if (strcmp(tokens->items[2], "-wr") == 0) flags = 2;
+                open(tokens->items[1], flags);
+            }else
+                printf("ERROR: Incorrect # of arguments.\nUsage: open [FILENAME] [MODE] (-r|-w|-rw)\n");
+        }else if (strcmp(tokens->items[0], "lsof") == 0){
+            lsof();
+        }else if (strcmp(tokens->items[0], "close") == 0){
+            if(tokens->items[1] != NULL)
+                close(tokens->items[1]);
+            else
+                printf("ERROR: You must specify a file to close\n");
         }
         //add_to_path(tokens->items[0]);      // move this out to its correct place;
         free(input);
@@ -316,15 +343,78 @@ void cp(char* FILENAME, char* TO){
 // Part 3 END
 
 // Part 4 READ
-FILE * open(char* FILENAME, char* FLAGS){
+void open(char* FILENAME, int FLAGS){
     // If file exists in cwd, not already opened, and flag is valid
     // Initialize FILE * offset to 0
     // Add cwd/FILENAME to open file table
+    int alreadyOpen = find(FILENAME);
+    int i = 0;
+
+    if(alreadyOpen == 0){
+        printf("ERROR: %s is a directory\n", FILENAME);
+        return;
+    }else if(alreadyOpen == -1){
+        printf("ERROR: File %s does not exist\n", FILENAME); 
+        return;
+    }
+
+    for(i = 0; i < 10; i++)
+    {
+        if(openFiles[i].mode != - 1 && strcmp(openFiles[i].path, cwd.path) == 0  && strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0)
+        {
+            printf("Error: %s is already open\n", FILENAME);
+            return;
+        }
+        if(openFiles[i].mode != -1)
+            numFilesOpen++;
+    }
+    if (numFilesOpen == 10)
+    {
+        printf("Error: Max number of files already open\n");
+        return;
+    }else
+    {
+        for(i = 0; i < 10; i++){
+            if(openFiles[i].mode == -1){
+                unsigned short Hi = currEntry.DIR_FstClusHi;
+                unsigned short Lo = currEntry.DIR_FstClusLo;
+                unsigned int cluster = (Hi<<8) | Lo;
+                unsigned long clusterOffset = (firstDataSector + ((cluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                if(cluster == 0){ // Edge case of ".."
+                    cluster = bpb.BPB_RootClus;
+                    clusterOffset = cwd.rootOffset;
+                }
+
+                openFiles[i].path = cwd.path; 
+                openFiles[i].offset = 0;
+                openFiles[i].dirEntry = currEntry;
+                openFiles[i].firstCluster = cluster;
+                openFiles[i].firstClusterOffset = clusterOffset;
+                openFiles[i].mode = FLAGS;
+                break;
+            }
+        }
+        printf("Opened %s with size %d\n", openFiles[i].dirEntry.DIR_Name, openFiles[i].dirEntry.DIR_FileSize);
+        numFilesOpen++;
+    }
 }
 
 void close(char* FILENAME){
     // If file exists in cwd and is opened
-    // Remove file entry from open file table
+    // lazy delete file entry from open file table
+    if(find(FILENAME) == 1){
+        int i;
+        for(i = 0; i < 10; i++){
+            if(openFiles[i].mode != - 1 && strcmp(openFiles[i].path, cwd.path) == 0  && strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0){
+                openFiles[i].mode = -1;
+                printf("Closed %s\n", FILENAME);
+                return;
+            }
+        }
+    }else if(find(FILENAME) == -1){
+        printf("ERROR: The file %s could not be find in the current working directory\n", FILENAME);
+    }else
+        printf("ERROR: %s is a directory\n", FILENAME);
 }
 
 void lsof(void){
@@ -333,6 +423,26 @@ void lsof(void){
     // print("Index in table, FILENAME, mode (flags), offset of FILE *, full path").
     // else
     // print("No files are currently open");
+    int i =  0;
+
+    if (numFilesOpen == 0)
+    {
+        printf("No files are currently open\n");
+        return;
+    }else
+    {
+        printf("INDEX NAME      MODE      OFFSET      PATH\n");
+        for (i = 0; i < 10; i++)
+        {
+            if(openFiles[i].mode != -1){
+                char* mode;
+                if(openFiles[i].mode == 0) mode = "r";
+                if(openFiles[i].mode == 1) mode = "w";
+                if(openFiles[i].mode == 2) mode = "rw";
+                printf("%-6d%-10s%-10s%-12d%-s\n", i, openFiles[i].dirEntry.DIR_Name, mode, openFiles[i].offset, openFiles[i].path);
+            }
+        }
+    }
 }
 
 void size(char* FILENAME){
@@ -354,14 +464,15 @@ void lseek(char* FILENAME, unsigned int OFFSET){
     int i;
     int targetFile;
     for(i = 0; i < 10; i++){
-        if(strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0 && openFiles[i].mode != -1){
+        if(openFiles[i].mode != -1 && strcmp(openFiles[i].path, cwd.path) == 0 && strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0){
             fileOpen = 0;
-            targetFile = 1;
+            targetFile = i;
         }
     }
     if(fileOpen == 1){
         printf("ERROR: No file named %s has been opened.\n", FILENAME);
     }else if(OFFSET > openFiles[targetFile].dirEntry.DIR_FileSize){
+        printf("Size of file %s is %d\n", openFiles[targetFile].dirEntry.DIR_Name, openFiles[targetFile].dirEntry.DIR_FileSize);
         printf("ERROR: Offset is larger than file size.\n");
     }else{
         openFiles[targetFile].offset = OFFSET;
@@ -373,51 +484,60 @@ void read(char* FILENAME, unsigned int size){
     int i;          
     int targetFile;
     for(i = 0; i < 10; i++){   
-        if(strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0 && openFiles[i].mode != -1){
+        if(openFiles[i].mode != -1 && strcmp(openFiles[i].path, cwd.path) == 0 && strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0){
             fileOpen = 0;
-            targetFile = 1;
+            targetFile = i;
         }
     }
+
     if(fileOpen == 1){
         printf("ERROR: No file named %s has been opened for reading.\n", FILENAME);
-    }else if(openFiles[targetFile].dirEntry.DIR_FileSize > openFiles[targetFile].offset + size){
-        printf("ERROR: Offset is larger than file size.\n");
     }else{
         long originalPos = ftell(fp);
         char currChar;
-        File target = openFiles[targetFile];
-        long currByte = 0;
-        int clustersChained = target.offset / (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec);
-        int byteInCurrentCluster = target.offset % (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec);
-        int currCluster = target.firstCluster;
-        int currClusterOffset = target.firstClusterOffset;
+        File* target = &openFiles[targetFile];
+        int clustersChained = target->offset / (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec);
+        int byteInCurrentCluster = target->offset % (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec);
+        int currCluster = target->firstCluster;
+        int currClusterOffset = target->firstClusterOffset;
         int fatEntryOffset;
         int charsRead = 0;
+        int chained = 0;
         int i;
-        while(charsRead < size && target.offset < target.dirEntry.DIR_FileSize){
-            for(i = 0; i < clustersChained; i++){ // Immediately chain to current cluster and jump to byte where offset is
+        long currByte = byteInCurrentCluster;
+        fseek(fp, currClusterOffset, SEEK_SET);
+        if(target->dirEntry.DIR_FileSize < target->offset + size)
+            size = target->dirEntry.DIR_FileSize - target->offset;
+        if(target->dirEntry.DIR_FileSize <= target->offset)
+            return;
+        while(charsRead < size && target->offset < target->dirEntry.DIR_FileSize){
+            if(chained++ == 0){
+                for(i = 0; i < clustersChained; i++){ // Immediately chain to current cluster and jump to byte where offset is
+                    fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
+                    fseek(fp, fatEntryOffset, SEEK_SET);
+                    fread(&currCluster, sizeof(int), 1, fp);
+                    currClusterOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                    if(i == (clustersChained - 1)){
+                        currByte = currClusterOffset + byteInCurrentCluster;
+                        fseek(fp, currByte, SEEK_SET);
+                    }
+                    printf("After immediate chaining, currCluster is %d\n", currCluster);
+                }
+            }
+            // If end of current cluster is reached:
+            if(currByte % (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec) == 0 && target->offset != 0){
                 fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
                 fseek(fp, fatEntryOffset, SEEK_SET);
                 fread(&currCluster, sizeof(int), 1, fp);
                 currClusterOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
-                if(i == (clustersChained - 1)){
-                    currByte = currClusterOffset + byteInCurrentCluster;
-                    fseek(fp, currByte, SEEK_SET);
-                }
+                fseek(fp, currClusterOffset, SEEK_SET);
             }
-            // If end of current cluster is reached:
-            if(currByte % (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec) == 0 && target.offset != 0){ 
-                fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
-                fread(&currCluster, sizeof(int), 1, fp);
-                currClusterOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
-                currByte = currClusterOffset;
-                fseek(fp, currByte, SEEK_SET);
-            }
+            fseek(fp, currClusterOffset + target->offset, SEEK_SET);
             fread(&currChar, sizeof(char), 1, fp);
             printf("%c", currChar);
             currByte++;
             charsRead++;
-            target.offset++;
+            target->offset++;
         }
         fseek(fp, originalPos, SEEK_SET);
     }
