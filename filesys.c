@@ -14,6 +14,7 @@
 
 // data structures for FAT32 
 // Hint: BPB, DIR Entry, Open File Table -- how will you structure it?
+
 typedef struct __attribute__((packed)){
     unsigned char DIR_Name[11];
     unsigned char DIR_Attr;
@@ -69,7 +70,6 @@ typedef struct{
     unsigned int firstCluster; // First cluster location in bytes
 } File;
 
-
 // stack implementation -- you will have to implement a dynamic stack
 // Hint: For removal of files/directories
 
@@ -105,6 +105,9 @@ FILE* fp;
 int rootDirSectors;
 int firstDataSector;
 long firstDataSectorOffset;
+File openFiles[10];
+int numFilesOpen = 0;
+
 
 int main(int argc, char * argv[]) {
     // error checking for number of arguments.
@@ -297,15 +300,60 @@ void cp(char* FILENAME, char* TO){
 // Part 3 END
 
 // Part 4 READ
-FILE * open(char* FILENAME, char* FLAGS){
+void * open(char* FILENAME, char* FLAGS){
     // If file exists in cwd, not already opened, and flag is valid
     // Initialize FILE * offset to 0
     // Add cwd/FILENAME to open file table
+    int alreadyOpen = 0;
+    int i = 0;
+
+    for(i = 0; i <= numFilesOpen; i++)
+    {
+        if(openFiles[numFilesOpen].name == FILENAME)
+        {
+            printf("Error: %s is already open", FILENAME);
+        }
+    }
+
+    if (numFilesOpen >= 10)
+    {
+        print("Error: Max number of files already open");
+    }
+
+    else
+    {
+        numFilesOpen++;
+        openFiles[numFilesOpen].name = FILENAME;
+        openFiles[numFilesOpen].offset = 0;
+    }
 }
 
 void close(char* FILENAME){
     // If file exists in cwd and is opened
     // Remove file entry from open file table
+    int alreadyOpen = 0;
+    int i = 0;
+
+    for(i = 0; i <= numFilesOpen; i++)
+    {
+        if(openFiles[numFilesOpen].name == FILENAME)
+        {
+            alreadyOpen = numFilesOpen;
+        }
+    }
+
+    if (alreadyOpen == 0)
+    {
+        printf("Error: File is not open or does not exist");
+        return;
+    }
+
+    else
+    {
+        for(i = alreadyOpen; i < numFilesOpen; i++)
+            openFiles[alreadyOpen] = openFiles[alreadyOpen+1];
+        numFilesOpen--;
+    }
 }
 
 void lsof(void){
@@ -314,6 +362,22 @@ void lsof(void){
     // print("Index in table, FILENAME, mode (flags), offset of FILE *, full path").
     // else
     // print("No files are currently open");
+    int i =  0;
+
+    if (numFilesOpen == 0)
+    {
+        print("No files are currently open");
+        return;
+    }
+    
+    else
+    {
+        for (i = 0; i < numFilesOpen; i++)
+        {
+            // mode??
+            printf("%d: %s\n   %d", i, openFiles->name, openFiles->offset);
+        }
+    }
 }
 
 void size(char* FILENAME){
