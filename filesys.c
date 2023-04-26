@@ -76,11 +76,9 @@ typedef struct{
 
 typedef struct {
     char path[PATH_SIZE]; // path string
-    int cluster;
-    long byteOffset;
-    long rootOffset;
-    // add a variable to help keep track of current working directory in file.
-    // Hint: In the image, where does the first directory entry start?
+    unsigned int cluster;
+    unsigned long byteOffset;
+    unsigned long rootOffset;
 } CWD;
 
 typedef struct  {
@@ -102,6 +100,8 @@ void size(char* FILENAME);
 void open(char* FILENAME, int FLAGS);
 void lsof(void);
 void close(char* FILENAME);
+void mkdir(char* DIRNAME);
+void creat(char* FILENAME);
 
 // global variables
 CWD cwd;
@@ -138,6 +138,7 @@ int main(int argc, char * argv[]) {
     memset(cwd.path, 0, PATH_SIZE);
     strcat(cwd.path, argv[1]);
 
+    printf("Fat starts at byte %lu and ends at byte %lu\n", bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec, (bpb.BPB_RsvdSecCnt + bpb.BPB_NumFATs * bpb.BPB_FATSz32) * bpb.BPB_BytesPerSec);
     // Initialize all empty File objects in openFiles[10] to be closed
     int i;
     for(i = 0; i < 10; i++)
@@ -194,6 +195,16 @@ int main(int argc, char * argv[]) {
                 close(tokens->items[1]);
             else
                 printf("ERROR: You must specify a file to close\n");
+        }else if (strcmp(tokens->items[0], "mkdir") == 0){
+            if(tokens->items[1] != NULL)
+                mkdir(tokens->items[1]);
+            else
+                printf("ERROR: You must name a directory to be created\n");
+        }else if (strcmp(tokens->items[0], "creat") == 0){
+            if(tokens->items[1] != NULL)
+                creat(tokens->items[1]);
+            else
+                printf("ERROR: You must name a file to be created\n");
         }
         //add_to_path(tokens->items[0]);      // move this out to its correct place;
         free(input);
@@ -204,14 +215,15 @@ int main(int argc, char * argv[]) {
 }
 
 // helper functions -- to navigate file image
+// HELPER ACCESSORS START
 int find(char* DIRNAME){ // If found, currEntry will hold directory in question
     int i, j;
     unsigned long originalPos = ftell(fp);
-    int currCluster = cwd.cluster;
-    int fatEntryOffset;
+    unsigned int currCluster = cwd.cluster;
+    unsigned long fatEntryOffset;
     fseek(fp, cwd.byteOffset, SEEK_SET);
-    while(currCluster != 0xFFFFFFFF && currCluster != 0x0FFFFFF8 && currCluster != 0x0FFFFFFE && currCluster != 0xFFFFFFF && currCluster != 0xFFFFFFFF){
-        long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+    while(currCluster < bpb.BPB_TotSec32){
+        unsigned long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
         fseek(fp, byteOffsetOfCluster, SEEK_SET);
         for(i = 0; i < 16; i++){
             fread(&currEntry, sizeof(DirEntry), 1, fp);
@@ -230,20 +242,76 @@ int find(char* DIRNAME){ // If found, currEntry will hold directory in question
         }
         fatEntryOffset = (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec + (currCluster * 4));
         fseek(fp, fatEntryOffset, SEEK_SET);
+        printf("End of cluster %d (%X)\n", currCluster, currCluster);
         fread(&currCluster, sizeof(int), 1, fp);
-    }
+        printf("Moving on to cluster %d (%X)\n", currCluster, currCluster);
+    } 
+    printf("End of Cluster encountered\n");
     fseek(fp, originalPos, SEEK_SET);
     return -1; // Directory does NOT exist at all
 }
 
+int findNextFreeFatEntry(){ // Returns cluster num of next free fat entry
+    unsigned long originalPos = ftell(fp);
+    fseek(fp, bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec, SEEK_SET);
+    unsigned int currCluster;
+    unsigned long clusterOffset; 
+    fread(&currCluster, sizeof(unsigned int), 1, fp);
+    while(currCluster != 0x0000000){
+        fread(&currCluster, sizeof(unsigned int), 1, fp);
+        clusterOffset = ftell(fp) - sizeof(unsigned int);
+        printf("Read in %X\n", currCluster);
+    }
+    printf("Found free fat entry at cluster %d (%d) with offset %lu\n", currCluster, ((clusterOffset - (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec)) / 4), clusterOffset);
+    fseek(fp, originalPos, SEEK_SET);
+    return (clusterOffset - (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec)) / 4;
+}
 
+// HELPER ACCESSORS END
+
+// HELPER MUTATORS START
+void expandCluster(int cluster){ // Expands the current cluster by finding its' endpoint and creating a new one it can chain to, also updates FAT
+    unsigned long originalPos = ftell(fp);
+    unsigned long fatEntryOffset = (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (cluster * 4);
+    unsigned int currCluster;
+    char empty[512] = {0x0}; 
+    fseek(fp, fatEntryOffset, SEEK_SET); 
+    fread(&currCluster, sizeof(int), 1, fp);
+    while(currCluster < bpb.BPB_TotSec32){
+        fatEntryOffset = (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec + (currCluster * 4));
+        fseek(fp, fatEntryOffset, SEEK_SET);
+        fread(&currCluster, sizeof(int), 1, fp);
+    } 
+    fseek(fp, -sizeof(int), SEEK_CUR);
+    unsigned int newCluster = findNextFreeFatEntry();
+    unsigned long newClusterOffset = (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (newCluster * 4);
+    unsigned long newDataClusterOffset = (firstDataSector + ((newCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+    unsigned int EOC = 0xFFFFFFF;
+    fwrite(&newCluster, sizeof(int), 1, fp);
+    fseek(fp, newClusterOffset, SEEK_SET);
+    fwrite(&EOC, sizeof(int), 1, fp);
+    printf("Claimed new cluster %d, chaining old cluster %d to new\n", newCluster, cluster);
+    fseek(fp, newDataClusterOffset, SEEK_SET);
+    fwrite(&empty, sizeof(empty), 1, fp);
+
+    fseek(fp, originalPos, SEEK_SET);
+
+    printf("Results of expansion:\n");
+    printf("cluster to be expanded: %d\n", cluster);
+    printf("has now been chained with: %d (marked by EOC %X)\n", newCluster, newCluster);
+    fseek(fp, fatEntryOffset, SEEK_SET);
+    fread(&currCluster, sizeof(int), 1, fp);
+    fseek(fp, originalPos, SEEK_SET);
+    printf("old cluster now points to: %d\n", currCluster);
+}
+// HELPER MUTATORS END
 // commands -- all commands mentioned in part 2-6 (17 cmds)
 
 // Part 1 MOUNT
 
 void info(void){
-   int totalDataSectors = bpb.BPB_TotSec32 - (bpb.BPB_RsvdSecCnt + (bpb.BPB_NumFATs * bpb.BPB_FATSz32) + rootDirSectors);
-   int totalClusters = totalDataSectors / bpb.BPB_SecsPerClus;
+   unsigned int totalDataSectors = bpb.BPB_TotSec32 - (bpb.BPB_RsvdSecCnt + (bpb.BPB_NumFATs * bpb.BPB_FATSz32) + rootDirSectors);
+   unsigned int totalClusters = totalDataSectors / bpb.BPB_SecsPerClus;
    printf("Position of root cluster: %d\n", bpb.BPB_RootClus);
    printf("Bytes per sector: %d\n", bpb.BPB_BytesPerSec);
    printf("Sectors per cluster: %d\n", bpb.BPB_SecsPerClus);
@@ -270,7 +338,7 @@ void cd(char* DIRNAME){
         }
         if(strcmp(DIRNAME, "..") == 0){
             int i = strlen(cwd.path);
-            char* current;
+            unsigned char* current;
             while(strcmp(current, "/") != 0){
                 cwd.path[i--] = '\0';
                 current = &cwd.path[i];
@@ -292,16 +360,15 @@ void ls(void){
     int i, j;
     unsigned long originalPos = ftell(fp);
     fseek(fp, cwd.byteOffset, SEEK_SET);
-    int currCluster = cwd.cluster;
-    int fatEntryOffset;
-    printf("Starting cluster is %d\n", cwd.cluster);
-    while(currCluster != 0xFFFFFFFF && currCluster != 0x0FFFFFF8 && currCluster != 0x0FFFFFFE && currCluster != 0xFFFFFF0F && currCluster != 0xFFFFFFF){
-        long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+    unsigned int currCluster = cwd.cluster;
+    long fatEntryOffset;
+    while(currCluster < bpb.BPB_TotSec32){
+        unsigned long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
         fseek(fp, byteOffsetOfCluster, SEEK_SET);
         for(i = 0; i < 16; i++){
             fread(&currEntry, sizeof(DirEntry), 1, fp);
-            if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name == 0x00)
-                continue;
+            if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name[0] == 0x00)
+                continue; // File is long file name or is deleted/does not exist
             for(j = 0; j < 11; j++){
                 if(currEntry.DIR_Name[j] == 0x20)
                     currEntry.DIR_Name[j] = 0x00;
@@ -323,18 +390,177 @@ void mkdir(char* DIRNAME){
     // create directory DIRNAME in cwd
     // else
     // printf("Error: file or directory with that name already exists");
+    int result = find(DIRNAME);
+    printf("Reaching here in mkdir\n");
+    DirEntry newEntry;
+    if(result != -1){
+        printf("Error: file or directory with that name already exists\n");
+    }else{
+        unsigned long originalPos = ftell(fp);
+        fseek(fp, cwd.byteOffset, SEEK_SET);
+        unsigned int currCluster = cwd.cluster;
+        unsigned int lastCluster;
+        unsigned long fatEntryOffset;
+        while(currCluster < bpb.BPB_TotSec32){
+            printf("End of cluster at cluster %d (%X) not yet reached\n", currCluster, currCluster);
+            int i = 0;
+            unsigned long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec; 
+            fseek(fp, byteOffsetOfCluster, SEEK_SET);
+            printf("Starting cluster %d at offet %lu\n", currCluster, ftell(fp));
+            for(i = 0; i < 16; i++){
+                fread(&currEntry, sizeof(DirEntry), 1, fp);
+                if(currEntry.DIR_Name[0] != 0x00)
+                    continue; // Entry is taken
+                else{
+                    printf("Free directory entry found at spot %d of 16, offset %lu\n", i + 1, ftell(fp));
+                    fseek(fp, -sizeof(DirEntry), SEEK_CUR);
+                    unsigned int newCluster = findNextFreeFatEntry();
+                    printf("Giving free fat entry %d to directory %s\n", newCluster, DIRNAME);
+                    unsigned int newClusterOffset = (firstDataSector + ((newCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                    unsigned short newClusHi = newCluster / 65536;
+                    unsigned short newClusLo = newCluster % 65536;
+                    char empty[512] = {0x0};
+                    int cwdResult = (cwd.cluster == 2) ? -1 : find(".");
+
+                    DirEntry dot, dotDot;
+                    strcpy(newEntry.DIR_Name, DIRNAME);
+                    newEntry.DIR_Attr = 0x10; // Directory
+                    newEntry.DIR_FileSize = 0x00;
+                    newEntry.DIR_FstClusHi = newClusHi;
+                    newEntry.DIR_FstClusLo = newClusLo;
+                    fwrite(&newEntry, sizeof(DirEntry), 1, fp); // Create directory entry
+                    printf("Wrote directory entry to offet %lu\n", ftell(fp));
+                    fseek(fp, newClusterOffset, SEEK_SET);
+                    fwrite(&empty, 1, sizeof(empty), fp); // Initialize cluster to 0
+                    fseek(fp, newClusterOffset, SEEK_SET);
+                    dot = newEntry; 
+                    
+                    if(cwdResult != -1){ // if not root directory
+                        dotDot = currEntry;
+                        int i;
+                        for(i = 0; i < 11; i++){
+                            if(i < 2)
+                                dotDot.DIR_Name[i] = '.';
+                            else
+                                dotDot.DIR_Name[i] = 0x0;
+
+                            if(i < 1)
+                                dot.DIR_Name[i] = '.';
+                            else    
+                                dot.DIR_Name[i] = 0x0;
+                        }
+                    }else{
+                        int i;
+                        for(i = 0; i < 11; i++){
+                            if(i < 2)
+                                dotDot.DIR_Name[i] = '.';
+                            else
+                                dotDot.DIR_Name[i] = 0x0;
+
+                            if(i < 1)
+                                dot.DIR_Name[i] = '.';   
+                            else    
+                                dot.DIR_Name[i] = 0x0; 
+                        }
+                        dotDot.DIR_Attr = 0x10;
+                        dotDot.DIR_FstClusHi = 0x00;
+                        dotDot.DIR_FstClusLo = 0x00;
+                    }
+                    fwrite(&dot, sizeof(DirEntry), 1, fp);
+                    fwrite(&dotDot, sizeof(DirEntry), 1, fp);
+                    fseek(fp, newCluster + (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec), SEEK_SET); // Update FAT table
+                    fwrite(&newCluster, sizeof(int), 1, fp);
+
+                    fseek(fp, originalPos, SEEK_SET);
+                    printf("Created directory in cluster %lu\n", currCluster);
+                    fseek(fp, cwd.cluster + (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec), SEEK_SET);
+                    fread(&currCluster, sizeof(int), 1, fp);
+                    printf("Root cluster is pointing at %d for next cluster.\n", currCluster);
+                    fseek(fp, originalPos, SEEK_SET);
+                    return;
+                }
+            }
+            fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
+            fseek(fp, fatEntryOffset, SEEK_SET);
+            fread(&currCluster, sizeof(int), 1, fp);
+            printf("Out of space in this cluster, chaining to %d with hex value %X\n", currCluster, currCluster);
+        }
+        // If you've reached here, you've run out of clusters so:
+        printf("Out of clusters, expanding\n");
+        expandCluster(cwd.cluster); // Add another cluster
+        fseek(fp, originalPos, SEEK_SET);
+        mkdir(DIRNAME); // Then try again
+        return;
+    }
 }
 
-void creat(char* DIRNAME){
+void creat(char* FILENAME){
     // If DIRNAME does NOT exist
     // create file DIRNAME in cwd
     // else
     // printf("Error: file or directory with that name already exists");
+    int result = find(FILENAME);
+    if(result != -1){
+        printf("Error: file or directory with that name already exists");
+    }else{
+        unsigned long originalPos = ftell(fp);
+        DirEntry newEntry;
+        DirEntry tracker;
+        strcpy(newEntry.DIR_Name, FILENAME);
+        newEntry.DIR_Attr = 0x20;
+        newEntry.DIR_FileSize = 0x0;
+        newEntry.DIR_FstClusLo = 0x0;
+        newEntry.DIR_FstClusHi = 0x0;
+        int i;
+        unsigned int currCluster = cwd.cluster; 
+        unsigned long fatEntryOffset;
+        fseek(fp, cwd.byteOffset, SEEK_SET);
+        while(currCluster < bpb.BPB_TotSec32){
+            unsigned long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+            fseek(fp, byteOffsetOfCluster, SEEK_SET);
+            for(i = 0; i < 16; i++){
+                fread(&tracker, sizeof(DirEntry), 1, fp);
+                if(tracker.DIR_Name[0] == 0x00){
+                    printf("Name %s of slot %d is free\n", tracker.DIR_Name, i);
+                    fseek(fp, -sizeof(DirEntry), SEEK_CUR);
+                    fwrite(&newEntry, sizeof(DirEntry), 1, fp);
+                    fseek(fp, originalPos, SEEK_SET);
+                    return;
+                }
+            }
+            fatEntryOffset = (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec + (currCluster * 4));
+            fseek(fp, fatEntryOffset, SEEK_SET);
+            fread(&currCluster, sizeof(int), 1, fp);
+        }
+        expandCluster(cwd.cluster);
+        fseek(fp, originalPos, SEEK_SET);
+        creat(FILENAME);
+    }
 }
 
 void cp(char* FILENAME, char* TO){
+    int fileResult = find(FILENAME);
+    int toResult = find(TO);
     // if FILENAME does not exist, print error
-
+    if(fileResult == -1){
+        printf("ERROR: %s does not exist\n");
+    }else if(toResult == 0){ // If TO is a directory
+        cd(TO);
+        fileResult = find(FILENAME);
+        if(fileResult == -1){
+            creat(FILENAME);
+            // Fat Allocation then write with cluster chaining
+        }else(fileResult == 1){
+            // Overwrite file with cluster chaining if necessary
+        }else{
+            printf("ERROR: the directory %s contains a subdirectory %s of the same name\n", TO, FILENAME);
+        }
+    }else if(toResult == 1){
+        //Overwrite existing file with cluster chaining if necessary
+    }else{
+        creat(FILENAME);
+        // Fat Allocation then write with cluster chaining
+    }
     // If TO is valid
     // copy into a folder if TO is a directory
     // else
