@@ -105,6 +105,7 @@ void close(char* FILENAME);
 void remove_file(char* FILENAME);
 void remove_directory(char* DIRNAME);
 void clear_FAT(unsigned int clusterNumber);
+void rename_(char* FILENAME, char* NEWFILENAME);
 
 // global variables
 CWD cwd;
@@ -203,6 +204,8 @@ int main(int argc, char * argv[]) {
         }else if (strcmp(tokens->items[0], "rmdir") == 0){
             printf("removing directory");
             remove_directory(tokens->items[1]);
+        }else if (strcmp(tokens->items[0], "rename") == 0){
+            rename_(tokens->items[1], tokens->items[2]);
         }
         //add_to_path(tokens->items[0]);      // move this out to its correct place;
         free(input);
@@ -555,26 +558,65 @@ void read(char* FILENAME, unsigned int size){
 
 // Part 4 END
 
-// Part 6 DELETE
+// Part 5 UPDATE
 
-void clear_FAT(unsigned int clusterNumber)
+void rename_(char* FILENAME, char* NEWFILENAME)
 {
-    unsigned int temp = clusterNumber;
-    unsigned int temp2 = 0;
+    int i,j;
+    unsigned long originalPos = ftell(fp);
+    fseek(fp, cwd.byteOffset, SEEK_SET);
+    int currCluster = cwd.cluster;
+    int FatEntryOffset;
 
-    while (temp != 0xFFFFFFFF && temp != 0x0FFFFFF8 && temp != 0x0FFFFFFE && temp != 0xFFFFFF0F && temp != 0xFFFFFFF)
+    if (find(FILENAME) == -1)
     {
-        fseek(fp, (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec)+(temp*4), SEEK_SET);
-        fread(&temp, sizeof(int), 1, fp);
-        fseek(fp, -4, SEEK_CUR);
-        fwrite(&temp2, sizeof(int), 1, fp);
+        printf("Error: %s does not exist", FILENAME);
+        return;
     }
+    else if (find(FILENAME) == 1 || find(FILENAME) == 0)
+    {
+        int break_while = 0;
+        printf("Starting cluster is %d\n", cwd.cluster);
+        while(currCluster != 0xFFFFFFFF && currCluster != 0x0FFFFFF8 && currCluster != 0x0FFFFFFE && currCluster != 0xFFFFFF0F && currCluster != 0xFFFFFFF)
+        {
+            long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+            fseek(fp, byteOffsetOfCluster, SEEK_SET);
+            for(i = 0; i < 16; i++)
+            {
+                fread(&currEntry, sizeof(DirEntry), 1, fp);
+                if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name[0] == 0x00)
+                    continue;
 
-    fseek(fp, -4, SEEK_CUR);
-    fwrite(&temp2, sizeof(int), 1, fp);
+                for(j = 0; j < 11; j++)
+                {
+                    if(currEntry.DIR_Name[j] == 0x20)
+                        currEntry.DIR_Name[j] = 0x00;
+                }
+                if(strcmp(FILENAME, currEntry.DIR_Name) == 0)
+                {
+                    //currEntry.DIR_Name[0] = 0x00;
+                    strcpy(currEntry.DIR_Name, NEWFILENAME);
+                    //unsigned int clusterNumber = currEntry.DIR_FstClusLo + (currEntry.DIR_FstClusHi*65536);
+                    fseek(fp, -32, SEEK_CUR);
+                    fwrite(&currEntry, sizeof(DirEntry), 1, fp);
+                    //clear_FAT(clusterNumber);
+                    break_while = 1;
+                    break;
+                }
 
+                printf("%s ", currEntry.DIR_Name);
+            }
+
+            if (break_while)
+                break;
+        }
+    }
     return;
 }
+
+// Part 5 END
+
+// Part 6 DELETE
 
 void remove_file(char* FILENAME)
 {
@@ -693,6 +735,27 @@ void remove_directory(char *DIRNAME)
     
     return;
 }
+
+void clear_FAT(unsigned int clusterNumber)
+{
+    unsigned int temp = clusterNumber;
+    unsigned int temp2 = 0;
+
+    while (temp != 0xFFFFFFFF && temp != 0x0FFFFFF8 && temp != 0x0FFFFFFE && temp != 0xFFFFFF0F && temp != 0xFFFFFFF)
+    {
+        fseek(fp, (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec)+(temp*4), SEEK_SET);
+        fread(&temp, sizeof(int), 1, fp);
+        fseek(fp, -4, SEEK_CUR);
+        fwrite(&temp2, sizeof(int), 1, fp);
+    }
+
+    fseek(fp, -4, SEEK_CUR);
+    fwrite(&temp2, sizeof(int), 1, fp);
+
+    return;
+}
+
+// Part 6 END
 
 // add directory string to cwd path -- helps keep track of where we are in image.
 void add_to_path(char * dir) {
