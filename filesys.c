@@ -376,9 +376,7 @@ void ls(void){
         printf("\n");
         fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
         fseek(fp, fatEntryOffset, SEEK_SET);
-        printf("ls: cluster %d end, chaining to cluster ", currCluster);
         fread(&currCluster, sizeof(int), 1, fp);
-        printf("%d (%X)(offset %d)\n", currCluster, currCluster, ftell(fp));
     }
     fseek(fp, originalPos, SEEK_SET);
 }
@@ -514,19 +512,15 @@ void creat(char* FILENAME){
                 if(tracker.DIR_Name[0] == 0x00){
                     fseek(fp, -sizeof(DirEntry), SEEK_CUR);
                     fwrite(&newEntry, sizeof(DirEntry), 1, fp);
-                    printf("creat: wrote directory into final cluster %d at offset %lu\n", currCluster, ftell(fp));
                     fseek(fp, originalPos, SEEK_SET);
                     return;
                 }
             }
             fatEntryOffset = (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec + (currCluster * 4));
             fseek(fp, fatEntryOffset, SEEK_SET);
-            printf("creat: found end of cluster %d, chaining now to cluster ", currCluster);
             fread(&currCluster, sizeof(int), 1, fp);
-            printf("%d\n", currCluster);
         }
         expandCluster(cwd.cluster);
-        printf("creat: expanded cluster %d\n", cwd.cluster);
         fseek(fp, originalPos, SEEK_SET);
         creat(FILENAME);
     }
@@ -603,15 +597,10 @@ void cp(char* FILENAME, char* TO){
 
     if(source.DIR_FileSize == 0x0){ 
         printf("cp: condition checked\n");
-        /*if(wentIntoSubDir == 1){
-            printf("cp: Going into cd\n");
-            char* pause;
-            size_t s;
-            getline(&pause, &s, stdin);
+        if(wentIntoSubDir == 1){
             cd("..");
-            printf("cp: Made it out of cd\n");
-        }*/
-       // fseek(fp, originalPos, SEEK_SET);
+        }
+        fseek(fp, originalPos, SEEK_SET);
         return;
     }
 
@@ -661,14 +650,12 @@ void cp(char* FILENAME, char* TO){
     currCluster = cwd.cluster;
     while(currCluster < bpb.BPB_TotSec32){ // Find the destination file
         int i;
-        printf("cp: cluster %d is smaller than total sectors %d\n", currCluster, bpb.BPB_TotSec32);
         unsigned long byteSectorOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec; 
         fseek(fp, byteSectorOffset, SEEK_SET);
         for(i = 0; i < clusSize / 32; i++){ 
             fread(&tracker, sizeof(DirEntry), 1, fp);
             if(strcmp(tracker.DIR_Name, TO) == 0){ // Once dest file is found, begin copying
                 unsigned int destinationCluster = (tracker.DIR_FstClusHi<<8) | tracker.DIR_FstClusLo;
-                printf("cp: Starting copying into %s, whose contents are located at cluster %d\n", TO, destinationCluster);
                 unsigned long destinationOffset = (firstDataSector + ((destinationCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
                 sourceOffset = (firstDataSector + ((sourceCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
                 fseek(toWriter, destinationOffset, SEEK_SET);
@@ -684,7 +671,6 @@ void cp(char* FILENAME, char* TO){
                     int j;
                     for(j = 0; j < (clusSize); j++){
                         fread(&currByte, sizeof(char), 1, fp);
-                        printf("Writing byte %c from cluster %d at offset %lu to cluster %d at offset %lu\n", currByte, sourceCluster, ftell(fp), destinationCluster, ftell(toWriter));
                         fwrite(&currByte, sizeof(char), 1, toWriter);
                         bytesWritten++;
                     }
@@ -701,11 +687,9 @@ void cp(char* FILENAME, char* TO){
                 return; // Copying is done
             }
         }
-        printf("cp: File not found in cluster %d, chaining to next cluster at ", currCluster);
         fatEntryOffset = currCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
         fseek(fp, fatEntryOffset, SEEK_SET);
         fread(&currCluster, sizeof(int), 1, fp);
-        printf("%d (offset %lu)\n", currCluster, ftell(fp));
     }
 
     if(wentIntoSubDir == 1)
@@ -767,7 +751,6 @@ void open(char* FILENAME, int FLAGS){
                 break;
             }
         }
-        printf("Opened %s with size %d\n", openFiles[i].dirEntry.DIR_Name, openFiles[i].dirEntry.DIR_FileSize);
         numFilesOpen++;
     }
 }
@@ -785,17 +768,12 @@ void close(char* FILENAME){
             }
         }
     }else if(find(FILENAME) == -1){
-        printf("ERROR: The file %s could not be find in the current working directory\n", FILENAME);
+        printf("ERROR: The file %s could not be found in the current working directory\n", FILENAME);
     }else
         printf("ERROR: %s is a directory\n", FILENAME);
 }
 
 void lsof(void){
-    // Read from open file table
-    // If table is not empty
-    // print("Index in table, FILENAME, mode (flags), offset of FILE *, full path").
-    // else
-    // print("No files are currently open");
     int i =  0;
 
     if (numFilesOpen == 0)
@@ -845,7 +823,6 @@ void lseek(char* FILENAME, unsigned int OFFSET){
     if(fileOpen == 1){
         printf("ERROR: No file named %s has been opened.\n", FILENAME);
     }else if(OFFSET > openFiles[targetFile].dirEntry.DIR_FileSize){
-        printf("Size of file %s is %d\n", openFiles[targetFile].dirEntry.DIR_Name, openFiles[targetFile].dirEntry.DIR_FileSize);
         printf("ERROR: Offset is larger than file size.\n");
     }else{
         openFiles[targetFile].offset = OFFSET;
