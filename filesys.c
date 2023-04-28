@@ -104,10 +104,11 @@ void mkdir(char* DIRNAME);
 void creat(char* FILENAME);
 void cp(char* FILENAME, char* TO);
 void remove_file(char* FILENAME);
-void remove_directory(char* DIRNAME);
+void remove_directory(char* DIRNAME, char* FLAGS);
 void clear_FAT(unsigned int clusterNumber);
 void rename_(char* FILENAME, char* NEWFILENAME);
 void write(char* FILENAME, char* STRING);
+void dump(char* FILENAME); // Can also be used on directories
 
 // global variables
 CWD cwd;
@@ -160,11 +161,13 @@ int main(int argc, char * argv[]) {
     while(1) {
         printf("%s/>", cwd.path);
         input = get_input();
-        tokenlist * tokens = tokenize(input);    
+        tokenlist * tokens = tokenize(input);
         if(strcmp(tokens->items[0], "info") == 0){
             info();
         }else if(strcmp(tokens->items[0], "exit") == 0){
             fclose(fp);
+            free(input);
+            free_tokens(tokens);
             return 0;
         }else if(strcmp(tokens->items[0], "cd") == 0){
             if(tokens->items[1] != NULL)
@@ -228,7 +231,10 @@ int main(int argc, char * argv[]) {
 
         }else if (strcmp(tokens->items[0], "rmdir") == 0){
             if(tokens->items[1] != NULL){
-                remove_directory(tokens->items[1]);
+                if(strcmp(tokens->items[1], "-r") == 0)
+                    remove_directory(tokens->items[2], "-r");
+                else
+                    remove_directory(tokens->items[1], " ");
             }else
                 printf("ERROR: You must name a directory to remove\n");
         }else if (strcmp(tokens->items[0], "rename") == 0){
@@ -252,10 +258,16 @@ int main(int argc, char * argv[]) {
             }else
                 printf("ERROR: Incorrect # of arguments.\nUsage: write [FILENAME] [STRING]\n");
             free(remainingTokens);
+        }else if(strcmp(tokens->items[0], "dump") == 0){
+            if(tokens->items[1] != NULL)
+                dump(tokens->items[1]);
+            else
+                printf("ERROR: Specify a file you wish to dump the hex contents of\n");
         }
         //add_to_path(tokens->items[0]);      // move this out to its correct place; 
         free(input);
         free_tokens(tokens);
+        printf("Freed tokens\n");
     }
 
     return 0;
@@ -523,10 +535,6 @@ void mkdir(char* DIRNAME){
 }
 
 void creat(char* FILENAME){
-    // If DIRNAME does NOT exist
-    // create file DIRNAME in cwd
-    // else
-    // printf("Error: file or directory with that name already exists");
     int result = find(FILENAME);
     if(result != -1){
         printf("Error: file or directory with that name already exists\n");
@@ -581,7 +589,7 @@ void cp(char* FILENAME, char* TO){
     unsigned short sourceLo = currEntry.DIR_FstClusLo;
     unsigned int sourceCluster = (sourceHi<<8) | sourceLo;
     unsigned sourceOffset = (firstDataSector + ((sourceCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
-    
+
     FILE* toWriter = fopen(imageFile, "r+");
     DirEntry tracker;
     DirEntry source = currEntry;
@@ -635,7 +643,6 @@ void cp(char* FILENAME, char* TO){
     }
 
     if(source.DIR_FileSize == 0x0){ 
-        printf("cp: condition checked\n");
         if(wentIntoSubDir == 1){
             cd("..");
         }
@@ -703,7 +710,6 @@ void cp(char* FILENAME, char* TO){
                 for(k = 0; k < totalClusters; k++){
                     expandCluster(destinationCluster);
                 }
-                printf("cluster expanded by %d\n", totalClusters);
                 int bytesWritten = 0;
                 while(bytesWritten < source.DIR_FileSize){
                     char currByte;
@@ -740,9 +746,6 @@ void cp(char* FILENAME, char* TO){
 
 // Part 4 READ
 void open(char* FILENAME, int FLAGS){
-    // If file exists in cwd, not already opened, and flag is valid
-    // Initialize FILE * offset to 0
-    // Add cwd/FILENAME to open file table
     int alreadyOpen = find(FILENAME);
     int i = 0;
     unsigned long originalPos = ftell(fp);
@@ -794,10 +797,16 @@ void open(char* FILENAME, int FLAGS){
                     int break_while = 0;
                     fseek(fp, byteOffset, SEEK_SET);
                     int j;
-                    for(j = 0; j < clusSize / 32; j++){         
-                        fread(&tracker, sizeof(DirEntry), 1, fp);          
+                    for(j = 0; j < clusSize / sizeof(DirEntry); j++){         
+                        fread(&tracker, sizeof(DirEntry), 1, fp);
+                        int k;
+                        for(k = 0; k < 11; k++){
+                            if(tracker.DIR_Name[k] == 0x20)
+                                tracker.DIR_Name[k] = 0x00;
+                        }        
                         if(strcmp(tracker.DIR_Name, FILENAME) == 0){  
                             openFiles[i].dirEntryOffset = ftell(fp) - sizeof(DirEntry);         
+                            printf("Giving %s the dirEntryOffset of %lu\n", FILENAME, openFiles[i].dirEntryOffset);
                             break_while = 1;
                         }
                     }
@@ -820,8 +829,6 @@ void open(char* FILENAME, int FLAGS){
 }
 
 void close(char* FILENAME){
-    // If file exists in cwd and is opened
-    // lazy delete file entry from open file table
     if(find(FILENAME) == 1){
         int i;
         for(i = 0; i < 10; i++){
@@ -869,9 +876,6 @@ void size(char* FILENAME){
     }else{
         printf("%d %s\n", currEntry.DIR_FileSize, FILENAME);
     }
-    // print("Size in bytes: ");
-    // else
-    // print("Error: file does not exist");
 }
 
 void lseek(char* FILENAME, unsigned int OFFSET){
@@ -898,7 +902,7 @@ void read(char* FILENAME, unsigned int size){
     int i;          
     int targetFile;
     for(i = 0; i < 10; i++){   
-        if(openFiles[i].mode != -1 && strcmp(openFiles[i].path, cwd.path) == 0 && strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0){
+        if((openFiles[i].mode == 0 || openFiles[i].mode == 2) && strcmp(openFiles[i].path, cwd.path) == 0 && strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0){
             fileOpen = 0;
             targetFile = i;
         }
@@ -956,7 +960,6 @@ void read(char* FILENAME, unsigned int size){
         fseek(fp, originalPos, SEEK_SET);
     }
 }
-
 // Part 4 END
 
 // Part 5 UPDATE
@@ -992,14 +995,15 @@ void write(char* FILENAME, char* STRING){
         if(target->dirEntry.DIR_FileSize < target->offset + size){
             printf("write: This write will expand storage\n");
             int bytesNeeded = (target->offset + size) - target->dirEntry.DIR_FileSize;
-            int extraClusters = bytesNeeded % (bpb.BPB_BytesPerSec * bpb.BPB_SecsPerClus);
+            int extraClusters = (bytesNeeded + size) / (bpb.BPB_BytesPerSec * bpb.BPB_SecsPerClus);
             for(i = 0; i < extraClusters; i++)
                 expandCluster(currCluster);
             target->dirEntry.DIR_FileSize += bytesNeeded;
-            printf("write: Updating file size to reflect extra %d bytes of storage\n", bytesNeeded);
             fseek(fp, target->dirEntryOffset, SEEK_SET);
+            printf("write: Updating file entry at offset %lu to reflect extra %d bytes of storage\n", ftell(fp), bytesNeeded);
             fwrite(&target->dirEntry, sizeof(DirEntry), 1, fp);
         }
+        
         while(charsWritten < size){
             if(chained++ == 0){
                 for(i = 0; i < clustersChained; i++){ // Immediately chain to current cluster and jump to byte where offset is
@@ -1078,11 +1082,20 @@ void rename_(char* FILENAME, char* NEWFILENAME)
                     break_while = 1;
                     break;
                 }
-
-                printf("%s ", currEntry.DIR_Name);
             }
-            if (break_while)
+            if (break_while){
+                for(i = 0; i < 10; i++){
+                    if(strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0 && strcmp(openFiles[i].path, cwd.path) == 0){
+                        for(j = 0; j < 11; j++)
+                            if(j < strlen(NEWFILENAME))
+                                openFiles[i].dirEntry.DIR_Name[j]= NEWFILENAME[j];
+                            else
+                                openFiles[i].dirEntry.DIR_Name[j]= 0x0;
+                        break;
+                    }
+                }
                 break;
+            }
             fatEntryOffset = currCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
             fseek(fp, fatEntryOffset, SEEK_SET);
             fread(&currEntry, sizeof(unsigned int), 1, fp);
@@ -1116,6 +1129,13 @@ void remove_file(char* FILENAME)
     else if (find(FILENAME) == 1)
     {
         int break_while = 0;
+
+        for(i = 0; i < 10; i++){
+            if(strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0 && strcmp(openFiles[i].path, cwd.path) == 0 && openFiles[i].mode != -1){
+                printf("This file is opened and cannot be removed\n");
+                return;
+            }
+        }
 
         while(currCluster < bpb.BPB_TotSec32)
         {
@@ -1157,9 +1177,12 @@ void remove_file(char* FILENAME)
     return;
 }
 
-void remove_directory(char *DIRNAME)
+void remove_directory(char *DIRNAME, char* FLAGS)
 {
     int i,j;
+    int recursionOn;
+    if(strcmp(FLAGS, "-r") == 0)
+        recursionOn = 1;
     unsigned long originalPos = ftell(fp);
     fseek(fp, cwd.byteOffset, SEEK_SET);
     int currCluster = cwd.cluster;
@@ -1177,12 +1200,17 @@ void remove_directory(char *DIRNAME)
     }
     else if (find(DIRNAME) == 0)
     {
+        if(strcmp(DIRNAME, ".") == 0 || strcmp(DIRNAME, "..") == 0){
+            printf("That is a special directory which may not be removed\n");
+            return;
+        }
+
         int break_while = 0;
         while(currCluster < bpb.BPB_TotSec32)
         {
-            long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+            unsigned long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
             fseek(fp, byteOffsetOfCluster, SEEK_SET);
-            for(i = 0; i < 16; i++)
+            for(i = 0; i < clusSize / sizeof(DirEntry); i++)
             {
                 fread(&currEntry, sizeof(DirEntry), 1, fp);
                 if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name[0] == 0x00)
@@ -1196,8 +1224,44 @@ void remove_directory(char *DIRNAME)
                 if(strcmp(DIRNAME, currEntry.DIR_Name) == 0)
                 {
                     printf("FOUND\n");
-                    currEntry.DIR_Name[0] = 0x00;
                     unsigned int clusterNumber = currEntry.DIR_FstClusLo + (currEntry.DIR_FstClusHi*65536);
+                    unsigned long parentPosition = ftell(fp);
+                    int subCluster = clusterNumber;
+                    DirEntry subEntry;
+                    while(subCluster < bpb.BPB_TotSec32){
+                        unsigned long byteOffsetOfSubCluster = (firstDataSector + ((subCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                        fseek(fp, byteOffsetOfSubCluster, SEEK_SET);
+                        for(j = 0; j < clusSize / sizeof(DirEntry); j++){
+                            fread(&subEntry, sizeof(DirEntry), 1, fp);
+                            int k;
+                            for(k = 0; k < 11; k++)
+                            {
+                                if(subEntry.DIR_Name[k] == 0x20)
+                                subEntry.DIR_Name[k] = 0x00;
+                            }// below: if a valid directory entry that isn't . or .. or longname is found (i.e, the directory is NOT empty)
+                            if(strcmp(subEntry.DIR_Name, ".") != 0 && strcmp(subEntry.DIR_Name, "..") != 0 && subEntry.DIR_Name[0] != 0x0 && subEntry.DIR_Attr != 0x0F){
+                                if(recursionOn == 1){ // If recursion is on
+                                    if(subEntry.DIR_Attr == 0x20){ // and current entry is a file
+                                        cd(DIRNAME);
+                                        remove_file(subEntry.DIR_Name); // Remove the file
+                                        cd("..");
+                                    }else if(subEntry.DIR_Attr == 0x10){ // else if current entry is a directory
+                                        cd(DIRNAME);
+                                        remove_directory(subEntry.DIR_Name, "-r"); // Recursively call to remove subdirectories
+                                        cd("..");
+                                    }
+                                }else{ // If recursion is NOT on, return an error
+                                    printf("ERROR: %s is not empty. For recursive directory deletion, use rmdir -r [DIRNAME]\n", DIRNAME);
+                                    return;
+                                }
+                            }
+                        }
+                        fatEntryOffset = subCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
+                        fseek(fp, fatEntryOffset, SEEK_SET);
+                        fread(&subCluster, sizeof(unsigned int), 1, fp);
+                    }
+                    fseek(fp, parentPosition, SEEK_SET);
+                    currEntry.DIR_Name[0] = 0x00;
                     fseek(fp, -sizeof(DirEntry), SEEK_CUR);
                     fwrite(&currEntry, sizeof(DirEntry), 1, fp);
                     printf("remove_file: First cluster is %d\n", clusterNumber);
@@ -1207,11 +1271,11 @@ void remove_directory(char *DIRNAME)
                     break;
                 }
             }
-            if (break_while)
+            if (break_while == 1)
                 break;
             fatEntryOffset = currCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
             fseek(fp, fatEntryOffset, SEEK_SET);
-            fread(&currEntry, sizeof(unsigned int), 1, fp);
+            fread(&currCluster, sizeof(unsigned int), 1, fp);
         }
     }
     fseek(fp, originalPos, SEEK_SET);
@@ -1241,6 +1305,69 @@ void clear_FAT(unsigned int clusterNumber)
 }
 
 // Part 6 END
+
+// Extra Credit START
+
+void dump(char* FILENAME){
+    int isFile = find(FILENAME);
+    unsigned long originalPos = ftell(fp);
+    unsigned short Hi = currEntry.DIR_FstClusHi;
+    unsigned short Lo = currEntry.DIR_FstClusLo;
+    unsigned int currCluster = (Hi<<8) | Lo;          
+
+    if(currCluster == 0 || (currEntry.DIR_Attr == 0x20 &&currEntry.DIR_FileSize == 0)){ // Empty File
+        printf("File contents are empty\n");
+        return;
+    }
+    DirEntry tracker;
+    int i; 
+    int bytesRead = 0;
+    int size = currEntry.DIR_FileSize;
+    unsigned long fatEntryOffset;
+    unsigned long byteOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+    fseek(fp, byteOffset, SEEK_SET);
+    while(currCluster < bpb.BPB_TotSec32){
+        byteOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec; 
+        if(bytesRead % (bpb.BPB_BytesPerSec * bpb.BPB_SecsPerClus) == 0 && bytesRead != 0)
+            fseek(fp, byteOffset, SEEK_SET);
+
+        if(isFile == 0){
+            unsigned char currByte;
+            for(i = 0; i < clusSize / sizeof(DirEntry); i++){
+                fread(&currByte, sizeof(char), 1, fp);
+                bytesRead++;
+                printf("%02X", currByte);
+                if(i % 2 == 0 && i != 0)
+                    printf(" ");
+            }
+            printf("\n");
+        }else if(isFile == 1){
+            if(bytesRead >= size)
+                break;
+            unsigned char currByte;
+            for(i = 0; i < bpb.BPB_BytesPerSec * bpb.BPB_SecsPerClus; i++){
+                fread(&currByte, sizeof(char), 1, fp);
+                bytesRead++;
+                printf("%02X", currByte);
+                if(i % 50 == 0 && i != 0)
+                    printf("\n"); 
+                else
+                    printf(" ");
+                if(bytesRead >= size)
+                    break;
+            }
+        }
+        if(bytesRead % (bpb.BPB_BytesPerSec * bpb.BPB_SecsPerClus) == 0 && bytesRead != 0){
+            fatEntryOffset = currCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
+            fseek(fp, fatEntryOffset, SEEK_SET);
+            fread(&currCluster, sizeof(unsigned int), 1, fp);
+            printf("\n");
+        }
+    }
+    if(isFile == 1)
+        printf("\n");
+    fseek(fp, originalPos, SEEK_SET);
+}
 
 // add directory string to cwd path -- helps keep track of where we are in image.
 void add_to_path(char * dir) {
