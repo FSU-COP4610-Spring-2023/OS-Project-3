@@ -309,7 +309,7 @@ void ls(void){
     int currCluster = cwd.cluster;
     int fatEntryOffset;
     while(currCluster < bpb.BPB_TotSec32){
-        long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+        unsigned long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
         fseek(fp, byteOffsetOfCluster, SEEK_SET);
         for(i = 0; i < 16; i++)
         {
