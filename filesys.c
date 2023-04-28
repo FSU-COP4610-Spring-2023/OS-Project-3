@@ -63,9 +63,10 @@ typedef struct __attribute__((packed)){
 typedef struct{
     char path[PATH_SIZE];
     DirEntry dirEntry;
-    unsigned int offset;
-    unsigned int firstCluster; // First cluster location
-    unsigned int firstClusterOffset; // Offset of first cluster in bytes
+    unsigned int offset; // Offset for reading and writing
+    unsigned int firstCluster; // First cluster number
+    unsigned long firstClusterOffset; // Offset of first cluster in bytes
+    unsigned long dirEntryOffset; // Offset for the dirEntry that represents the file
     int mode; // 2=rw, 1=w, 0=r, -1=not open (i.e, -1 is a "free" spot)
 } File;
 
@@ -106,9 +107,7 @@ void remove_file(char* FILENAME);
 void remove_directory(char* DIRNAME);
 void clear_FAT(unsigned int clusterNumber);
 void rename_(char* FILENAME, char* NEWFILENAME);
-int dir_is_empty(char *DIRNAME);
-
-
+void write(char* FILENAME, char* STRING);
 
 // global variables
 CWD cwd;
@@ -222,13 +221,37 @@ int main(int argc, char * argv[]) {
             else 
                 printf("ERROR: Incorrect # of arguments.\nUsage: cp [FILENAME] [DESTINATION]\n");
         }else if (strcmp(tokens->items[0], "rm")  == 0){
-            remove_file(tokens->items[1]);
+            if(tokens->items[1] != NULL){
+                remove_file(tokens->items[1]);
+            }else
+                printf("ERROR: You must name a file to remove\n");
+
         }else if (strcmp(tokens->items[0], "rmdir") == 0){
-            remove_directory(tokens->items[1]);
+            if(tokens->items[1] != NULL){
+                remove_directory(tokens->items[1]);
+            }else
+                printf("ERROR: You must name a directory to remove\n");
         }else if (strcmp(tokens->items[0], "rename") == 0){
-            rename_(tokens->items[1], tokens->items[2]);
-        }else if (strcmp(tokens->items[0], "empty") == 0){
-            printf("empty: %d\n", dir_is_empty(tokens->items[1]));
+            if(tokens->items[1] != NULL && tokens->items[2] != NULL){
+                rename_(tokens->items[1], tokens->items[2]);
+            }else
+                printf("ERROR: Incorrect # of arguments.\nUsage: rename [OLDNAME] [NEW]\n");
+        }else if(strcmp(tokens->items[0], "write") == 0){
+            int length = 0;
+            int i;
+            for(i = 2; i < tokens->size; i++){
+                length += strlen(tokens->items[i]) + 2;
+            }
+            char* remainingTokens = malloc(sizeof(char) * length);
+            for(i = 2; i < tokens->size; i++){
+                strcat(remainingTokens, tokens->items[i]);
+                strcat(remainingTokens, " ");
+            }
+            if(tokens->items[1] != NULL && tokens->items[2] != NULL){
+                write(tokens->items[1], remainingTokens);
+            }else
+                printf("ERROR: Incorrect # of arguments.\nUsage: write [FILENAME] [STRING]\n");
+            free(remainingTokens);
         }
         //add_to_path(tokens->items[0]);      // move this out to its correct place; 
         free(input);
@@ -267,7 +290,7 @@ int find(char* DIRNAME){ // If found, currEntry will hold directory in question
                 }
             }
         }
-        fatEntryOffset = (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec + (currCluster * 4));
+        fatEntryOffset = bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec + currCluster * 4;
         fseek(fp, fatEntryOffset, SEEK_SET);
         fread(&currCluster, sizeof(int), 1, fp);
     } 
@@ -395,8 +418,6 @@ void ls(void){
         fread(&currCluster, sizeof(int), 1, fp);
     }
     fseek(fp, originalPos, SEEK_SET);
-
-    return;
 }
 // Part 2 END
 
@@ -601,7 +622,7 @@ void cp(char* FILENAME, char* TO){
             return;
         }
     }else if(toResult == 1){ // If it exists, delete it and start anew
-//        rm(TO);
+        remove_file(TO);
         creat(TO);
     }else if(fileResult == 0){
         printf("ERROR: %s is a directory\n", FILENAME);
@@ -724,6 +745,7 @@ void open(char* FILENAME, int FLAGS){
     // Add cwd/FILENAME to open file table
     int alreadyOpen = find(FILENAME);
     int i = 0;
+    unsigned long originalPos = ftell(fp);
 
     if(alreadyOpen == 0){
         printf("ERROR: %s is a directory\n", FILENAME);
@@ -755,10 +777,6 @@ void open(char* FILENAME, int FLAGS){
                 unsigned short Lo = currEntry.DIR_FstClusLo;
                 unsigned int cluster = (Hi<<8) | Lo;
                 unsigned long clusterOffset = (firstDataSector + ((cluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
-                if(cluster == 0){ // Edge case of ".."
-                    cluster = bpb.BPB_RootClus;
-                    clusterOffset = cwd.rootOffset;
-                }
 
                 strcpy(openFiles[i].path, cwd.path); 
                 openFiles[i].offset = 0;
@@ -766,10 +784,38 @@ void open(char* FILENAME, int FLAGS){
                 openFiles[i].firstCluster = cluster;
                 openFiles[i].firstClusterOffset = clusterOffset;
                 openFiles[i].mode = FLAGS;
+
+                int currCluster = cwd.cluster;
+                int fatEntryOffset;
+                DirEntry tracker;
+                while(currCluster < bpb.BPB_TotSec32){
+                    printf("cluster %d is smaller than total sectors\n", currCluster);
+                    unsigned long byteOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                    int break_while = 0;
+                    fseek(fp, byteOffset, SEEK_SET);
+                    int j;
+                    for(j = 0; j < clusSize / 32; j++){         
+                        fread(&tracker, sizeof(DirEntry), 1, fp);          
+                        if(strcmp(tracker.DIR_Name, FILENAME) == 0){  
+                            openFiles[i].dirEntryOffset = ftell(fp) - sizeof(DirEntry);         
+                            break_while = 1;
+                        }
+                    }
+                    if(break_while == 1)
+                        break;
+                    printf("end of cluster %d reached, chaining to cluster ", currCluster);
+                    fatEntryOffset = currCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
+                    fseek(fp, fatEntryOffset, SEEK_SET);
+                    fread(&currCluster, sizeof(unsigned int), 1, fp);
+                    printf("%d\n", currCluster);  
+                }
+                
+                printf("Opened %s.\n", FILENAME);
                 break;
             }
         }
         numFilesOpen++;
+        fseek(fp, originalPos, SEEK_SET);
     }
 }
 
@@ -914,6 +960,82 @@ void read(char* FILENAME, unsigned int size){
 // Part 4 END
 
 // Part 5 UPDATE
+void write(char* FILENAME, char* STRING){
+    int fileOpen = 1;
+    int i;
+    int targetFile;
+
+    for(i = 0; i < 10; i++){
+        if((openFiles[i].mode == 1 || openFiles[i].mode == 2) && strcmp(openFiles[i].path, cwd.path) == 0 && strcmp(openFiles[i].dirEntry.DIR_Name, FILENAME) == 0){
+            fileOpen = 0;
+            targetFile = i;
+        }
+    }
+
+    if(fileOpen == 1){
+        printf("ERROR: No file named %s has been opened for writing.\n", FILENAME);
+    }else{
+        long originalPos = ftell(fp);
+        char currChar;
+        File* target = &openFiles[targetFile];
+        int clustersChained = target->offset / (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec);
+        int byteInCurrentCluster = target->offset % (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec);
+        int currCluster = target->firstCluster;
+        int currClusterOffset = target->firstClusterOffset;
+        int fatEntryOffset;
+        int charsWritten = 0;
+        int chained = 0;
+        int i;
+        long currByte = byteInCurrentCluster;
+        fseek(fp, currClusterOffset, SEEK_SET);
+        int size = strlen(STRING);
+        if(target->dirEntry.DIR_FileSize < target->offset + size){
+            printf("write: This write will expand storage\n");
+            int bytesNeeded = (target->offset + size) - target->dirEntry.DIR_FileSize;
+            int extraClusters = bytesNeeded % (bpb.BPB_BytesPerSec * bpb.BPB_SecsPerClus);
+            for(i = 0; i < extraClusters; i++)
+                expandCluster(currCluster);
+            target->dirEntry.DIR_FileSize += bytesNeeded;
+            printf("write: Updating file size to reflect extra %d bytes of storage\n", bytesNeeded);
+            fseek(fp, target->dirEntryOffset, SEEK_SET);
+            fwrite(&target->dirEntry, sizeof(DirEntry), 1, fp);
+        }
+        while(charsWritten < size){
+            if(chained++ == 0){
+                for(i = 0; i < clustersChained; i++){ // Immediately chain to current cluster and jump to byte where offset is
+                    fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
+                    fseek(fp, fatEntryOffset, SEEK_SET);
+                    fread(&currCluster, sizeof(int), 1, fp);
+                    currClusterOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                    if(i == (clustersChained - 1)){
+                        currByte = currClusterOffset + byteInCurrentCluster;
+                        fseek(fp, currByte, SEEK_SET);
+                    }
+                    printf("write: After immediate chaining, currCluster is %d\n", currCluster);
+                }
+            }
+            // If end of current cluster is reached:
+            if(currByte % (bpb.BPB_SecsPerClus * bpb.BPB_BytesPerSec) == 0 && target->offset != 0){
+                printf("write: Reached end of cluster at file offset %d\n", target->offset);
+                fatEntryOffset = ((bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec) + (currCluster * 4));
+                fseek(fp, fatEntryOffset, SEEK_SET);
+                fread(&currCluster, sizeof(int), 1, fp);
+                currClusterOffset = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
+                fseek(fp, currClusterOffset, SEEK_SET);
+            }
+            fseek(fp, currClusterOffset + target->offset, SEEK_SET);
+            printf("write: Writing a character now at file offset %d (%lu)\n", target->offset, ftell(fp));
+            if(charsWritten < size)
+                currChar = STRING[charsWritten++];
+            else
+                printf("Reached an out of bounds in STRING, index %d of 0-%d\n", charsWritten - 1, strlen(STRING) - 1);
+            fwrite(&currChar, sizeof(char), 1, fp);
+            currByte++;
+            target->offset++;
+        }
+        fseek(fp, originalPos, SEEK_SET);
+    }
+}
 
 void rename_(char* FILENAME, char* NEWFILENAME)
 {
@@ -921,17 +1043,17 @@ void rename_(char* FILENAME, char* NEWFILENAME)
     unsigned long originalPos = ftell(fp);
     fseek(fp, cwd.byteOffset, SEEK_SET);
     int currCluster = cwd.cluster;
-    int FatEntryOffset;
+    int fatEntryOffset;
 
     if (find(FILENAME) == -1)
     {
-        printf("Error: %s does not exist\n", FILENAME);
+        printf("Error: %s does not exist", FILENAME);
         return;
     }
     else if (find(FILENAME) == 1 || find(FILENAME) == 0)
     {
         int break_while = 0;
-        while(currCluster != 0xFFFFFFFF && currCluster != 0x0FFFFFF8 && currCluster != 0x0FFFFFFE && currCluster != 0xFFFFFF0F && currCluster != 0xFFFFFFF)
+        while(currCluster < bpb.BPB_TotSec32)
         {
             long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
             fseek(fp, byteOffsetOfCluster, SEEK_SET);
@@ -940,7 +1062,6 @@ void rename_(char* FILENAME, char* NEWFILENAME)
                 fread(&currEntry, sizeof(DirEntry), 1, fp);
                 if(currEntry.DIR_Attr == 0x0F || currEntry.DIR_Name[0] == 0x00)
                     continue;
-
                 for(j = 0; j < 11; j++)
                 {
                     if(currEntry.DIR_Name[j] == 0x20)
@@ -960,9 +1081,11 @@ void rename_(char* FILENAME, char* NEWFILENAME)
 
                 printf("%s ", currEntry.DIR_Name);
             }
-
             if (break_while)
                 break;
+            fatEntryOffset = currCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
+            fseek(fp, fatEntryOffset, SEEK_SET);
+            fread(&currEntry, sizeof(unsigned int), 1, fp);
         }
     }
     return;
@@ -978,7 +1101,7 @@ void remove_file(char* FILENAME)
     unsigned long originalPos = ftell(fp);
     fseek(fp, cwd.byteOffset, SEEK_SET);
     int currCluster = cwd.cluster;
-    int FatEntryOffset;
+    int fatEntryOffset;
 
     if (find(FILENAME) == -1)
     {
@@ -992,15 +1115,12 @@ void remove_file(char* FILENAME)
     }
     else if (find(FILENAME) == 1)
     {
-        printf("Deleting\n");
         int break_while = 0;
+
         while(currCluster < bpb.BPB_TotSec32)
         {
-            printf("in while\n");
             long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
-            printf("4");
             fseek(fp, byteOffsetOfCluster, SEEK_SET);
-            printf("5");
             for(i = 0; i < 16; i++)
             {
                 fread(&currEntry, sizeof(DirEntry), 1, fp);
@@ -1012,26 +1132,28 @@ void remove_file(char* FILENAME)
                     if(currEntry.DIR_Name[j] == 0x20)
                         currEntry.DIR_Name[j] = 0x00;
                 }
-                printf("6");
                 if(strcmp(FILENAME, currEntry.DIR_Name) == 0)
                 {
+                    close(FILENAME);
                     currEntry.DIR_Name[0] = 0x00;
                     unsigned int clusterNumber = currEntry.DIR_FstClusLo + (currEntry.DIR_FstClusHi*65536);
                     fseek(fp, -32, SEEK_CUR);
                     fwrite(&currEntry, sizeof(DirEntry), 1, fp);
-                    clear_FAT(clusterNumber);
+                    if(clusterNumber > 2){
+                        clear_FAT(clusterNumber);
+                    }
                     break_while = 1;
                     break;
                 }
-                printf("%s ", currEntry.DIR_Name);
             }
-
-            printf("7");
             if (break_while)
                 break;
+            fatEntryOffset = currCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
+            fseek(fp, fatEntryOffset, SEEK_SET);
+            fread(&currEntry, sizeof(unsigned int), 1, fp);
         }
     }
-    
+    fseek(fp, originalPos, SEEK_SET);
     return;
 }
 
@@ -1041,21 +1163,16 @@ void remove_directory(char *DIRNAME)
     unsigned long originalPos = ftell(fp);
     fseek(fp, cwd.byteOffset, SEEK_SET);
     int currCluster = cwd.cluster;
-    int FatEntryOffset;
+    int fatEntryOffset;
 
     if (find(DIRNAME) == -1)
     {
-        printf("Error: Directory does not exist\n");
+        printf("Error: Directory does not exist");
         return;
     }
     else if (find(DIRNAME) == 1)
     {
-        printf("Error: %s is a file, use rmdir command instead\n", DIRNAME);
-        return;
-    }
-    else if (dir_is_empty(DIRNAME) == 1)
-    {
-        printf("Error: %s is not empty\n", DIRNAME);
+        printf("Error: %s is a file, use rmdir command instead", DIRNAME);
         return;
     }
     else if (find(DIRNAME) == 0)
@@ -1078,77 +1195,49 @@ void remove_directory(char *DIRNAME)
                 }
                 if(strcmp(DIRNAME, currEntry.DIR_Name) == 0)
                 {
+                    printf("FOUND\n");
                     currEntry.DIR_Name[0] = 0x00;
                     unsigned int clusterNumber = currEntry.DIR_FstClusLo + (currEntry.DIR_FstClusHi*65536);
-                    fseek(fp, -32, SEEK_CUR);
+                    fseek(fp, -sizeof(DirEntry), SEEK_CUR);
                     fwrite(&currEntry, sizeof(DirEntry), 1, fp);
+                    printf("remove_file: First cluster is %d\n", clusterNumber);
                     clear_FAT(clusterNumber);
+                    printf("CLEARED\n");
                     break_while = 1;
                     break;
                 }
             }
             if (break_while)
                 break;
+            fatEntryOffset = currCluster * 4 + bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec;
+            fseek(fp, fatEntryOffset, SEEK_SET);
+            fread(&currEntry, sizeof(unsigned int), 1, fp);
         }
     }
-    
+    fseek(fp, originalPos, SEEK_SET);
     return;
 }
 
 void clear_FAT(unsigned int clusterNumber)
 {
+    unsigned long originalPos = ftell(fp);
     unsigned int temp = clusterNumber;
-    unsigned int temp2 = 0;
+    unsigned int temp2 = 0x0;
 
-    while (temp != 0xFFFFFFFF && temp != 0x0FFFFFF8 && temp != 0x0FFFFFFE && temp != 0xFFFFFF0F && temp != 0xFFFFFFF)
+    while (temp < bpb.BPB_TotSec32)
     {
         fseek(fp, (bpb.BPB_RsvdSecCnt * bpb.BPB_BytesPerSec)+(temp*4), SEEK_SET);
         fread(&temp, sizeof(int), 1, fp);
         fseek(fp, -4, SEEK_CUR);
+        printf("clear_FAT: clearing offset %lu with integer %d\n", ftell(fp), temp);
         fwrite(&temp2, sizeof(int), 1, fp);
     }
 
     fseek(fp, -4, SEEK_CUR);
     fwrite(&temp2, sizeof(int), 1, fp);
 
+    fseek(fp, originalPos, SEEK_SET);
     return;
-}
-
-int dir_is_empty(char *DIRNAME) // return 1 if it is empty, else return 0
-{
-    int found = 0;
-    cd(DIRNAME);
-
-    int currCluster = cwd.cluster;
-    int i,j;
-
-    while(currCluster < bpb.BPB_TotSec32)
-    {
-        long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
-        fseek(fp, byteOffsetOfCluster, SEEK_SET);
-        for(i = 0; i < 16; i++)
-        {
-            fread(&currEntry, sizeof(DirEntry), 1, fp);
-
-            for(j = 0; j < 11; j++)
-            {
-                if(currEntry.DIR_Name[j] == 0x20)
-                    currEntry.DIR_Name[j] = 0x00;
-            }
-            if((currEntry.DIR_Attr != 0x0F) && (currEntry.DIR_Name[0] != 0x00) && (strcmp(currEntry.DIR_Name, ".") != 0) && (strcmp(currEntry.DIR_Name, "..") != 0))
-            {
-                found = 1;
-                break;
-            }
-        }
-        if (found)
-            break;
-
-        fread(&currCluster, sizeof(unsigned int), 1, fp);
-    }
-
-    cd("..");
-    return found;
 }
 
 // Part 6 END
