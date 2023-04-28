@@ -27,8 +27,7 @@ Files:
     
 Bugs:
 
-    When ran on valgrind, valgrind reports that line 477, which contains the command "fseek(fp, newClusterOffset, SEEK_SET);" is utilizing an uninitialized byte, presumably newClusterOffset. newClusterOffset is guaranteed to be initialized at the beginning of each iteration of this section of code, so it is unclear why valgrind reports this. This appears in the valgrind report file during runtime, and seems to have absolutely no symptoms on how the executable runs or how data is read or written from the file image.
-    
+    When ran on valgrind, valgrind reports that line 477, which contains the command "fseek(fp, newClusterOffset, SEEK_SET);" is utilizing an uninitialized byte, presumably newClusterOffset. newClusterOffset is guaranteed to be initialized at the beginning of each iteration of this section of code, so it is unclear why valgrind reports this. This appears in the valgrind report file during runtime, and seems to have absolutely no symptoms on how the executable runs or how data is read or written from the file image. Otherwise, no memory leaks or other errors are reported. All heap allocations are freed.    
 Extra Credit:
 
     rm -r [FILENAME] : This project supports recursive directory deletion
