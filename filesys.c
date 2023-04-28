@@ -306,8 +306,8 @@ void ls(void){
     int i, j;
     unsigned long originalPos = ftell(fp);
     fseek(fp, cwd.byteOffset, SEEK_SET);
-    int currCluster = cwd.cluster;
-    int fatEntryOffset;
+    unsigned int currCluster = cwd.cluster;
+    long fatEntryOffset;
     while(currCluster < bpb.BPB_TotSec32){
         unsigned long byteOffsetOfCluster = (firstDataSector + ((currCluster - 2) * bpb.BPB_SecsPerClus)) * bpb.BPB_BytesPerSec;
         fseek(fp, byteOffsetOfCluster, SEEK_SET);
